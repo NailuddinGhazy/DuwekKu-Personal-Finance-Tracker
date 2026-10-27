@@ -11,6 +11,8 @@
     },
     "android": {
       "package": "com.nailuddinghazy.duwekku",
+      "googleServicesFile": "./google-services.json",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -23,7 +25,13 @@
     },
     "plugins": [
       "@react-native-community/datetimepicker",
-      "expo-web-browser"
-    ]
+      "expo-web-browser",
+      "@react-native-google-signin/google-signin"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "43ab7670-9c72-49e5-8471-ab38bb26cfde"
+      }
+    }
   }
 }
