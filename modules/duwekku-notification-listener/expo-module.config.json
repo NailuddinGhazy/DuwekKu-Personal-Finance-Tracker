@@ -1,0 +1,8 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": [
+      "expo.modules.duwekku_notification_listener.DuwekkuNotificationListener"
+    ]
+  }
+}

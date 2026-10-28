@@ -1,0 +1,12 @@
+﻿{
+  "name": "duwekku-notification-listener",
+  "version": "0.1.0",
+  "description": "Duwkku notification listener",
+  "main": "index.ts",
+  "types": "index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}
