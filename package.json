@@ -12,6 +12,7 @@
     "expo-dev-client": "~57.0.20",
     "expo-status-bar": "~57.0.1",
     "expo-web-browser": "~57.0.3",
+    "duwekku-notification-listener": "file:./modules/duwekku-notification-listener",
     "firebase": "^12.19.0",
     "react": "19.2.3",
     "react-native": "0.86.3"
@@ -21,9 +22,19 @@
   },
   "scripts": {
     "start": "expo start",
+    "start:android:usb": "npx metro start --host 127.0.0.1 --port 8081",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@types/react": "~19.2.4"
+  },
+
+  "expo": {
+    "autolinking": {
+      "nativeModulesDir": "./modules"
+    }
+  }
 }

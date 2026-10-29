@@ -5,6 +5,7 @@ type DuwekkuNotificationListenerModule = {
   isNotificationAccessEnabled(): boolean;
   openNotificationAccessSettings(): void;
   getPendingNotifications(): PendingPaymentNotification[];
+  acknowledgeNotification(id: string): void;
 };
 
 const DuwekkuNotificationListener =

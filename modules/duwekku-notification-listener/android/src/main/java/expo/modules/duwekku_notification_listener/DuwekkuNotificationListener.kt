@@ -13,6 +13,7 @@ import org.json.JSONObject
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.Locale
+import android.util.Log
 
 private const val PREFS_NAME = "duwekku_notification_listener"
 private const val PENDING_KEY = "pending_notifications"
@@ -57,7 +58,6 @@ class DuwekkuNotificationListener : Module() {
         JSONArray(prefs.getString(PENDING_KEY, "[]"))
       }.getOrElse { JSONArray() }
 
-      prefs.edit().remove(PENDING_KEY).apply()
 
       (0 until pending.length()).mapNotNull { index ->
         val item = pending.optJSONObject(index) ?: return@mapNotNull null
@@ -70,12 +70,44 @@ class DuwekkuNotificationListener : Module() {
         )
       }
     }
+    Function("acknowledgeNotification") { id: String ->
+      val context = appContext.reactContext
+        ?: throw IllegalStateException("React context belum tersedia")
+
+      val prefs = context.getSharedPreferences(
+        PREFS_NAME,
+        Context.MODE_PRIVATE
+      )
+
+      val pending = runCatching {
+        JSONArray(prefs.getString(PENDING_KEY, "[]"))
+      }.getOrElse { JSONArray() }
+
+      val remaining = JSONArray()
+
+      for (index in 0 until pending.length()) {
+        val item = pending.optJSONObject(index) ?: continue
+
+        if (item.optString("id") != id) {
+          remaining.put(item)
+        }
+      }
+
+      prefs.edit()
+        .putString(PENDING_KEY, remaining.toString())
+        .apply()
+    }
   }
 }
 
 class DuwekkuNotificationService : NotificationListenerService() {
   override fun onNotificationPosted(sbn: StatusBarNotification) {
     super.onNotificationPosted(sbn)
+
+    Log.d(
+      "DuwekKuNotif",
+      "Notifikasi diterima: package=${sbn.packageName}"
+    )
 
     if (sbn.packageName == packageName) return
 
@@ -88,7 +120,15 @@ class DuwekkuNotificationService : NotificationListenerService() {
       )?.toString()?.trim().orEmpty()
 
     val combined = "$title $text"
-    if (!isPaymentCandidate(combined)) return
+
+    Log.d("DuwekKuNotif", "Isi notifikasi: $combined")
+
+    if (!isPaymentCandidate(combined)) {
+      Log.d("DuwekKuNotif", "Ditolak oleh filter")
+      return
+    }
+
+Log.d("DuwekKuNotif", "Lolos filter pembayaran")
 
     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     val id = "${sbn.packageName}:${sbn.postTime}:${sbn.id}:${sbn.tag.orEmpty()}"

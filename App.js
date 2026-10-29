@@ -29,6 +29,7 @@ import {
   loginDenganGoogle,
   logoutDuwekKu,
 } from './authService';
+import DuwekkuNotificationListener from './modules/duwekku-notification-listener/src/DuwekkuNotificationListener';
 
 // Kunci lama dipertahankan hanya untuk menawarkan migrasi eksplisit.
 // Data baru selalu memakai kunci terpisah berdasarkan UID Firebase.
@@ -51,6 +52,128 @@ function parseDaftarTransaksi(raw) {
 
 const formatRupiah = (angka) =>
   'Rp ' + angka.toLocaleString('id-ID');
+
+function normalizeNotificationAmount(value) {
+  const cleaned = String(value)
+    .replace(/\s+/g, '')
+    .replace(/\./g, '')
+    .replace(/,/g, '.');
+
+  const parsed = Number(cleaned);
+
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseNominalNotifikasi(text) {
+  const rawText = (text || '').replace(/\s+/g, ' ').trim();
+
+  if (!rawText) return null;
+
+  const patterns = [
+    /(?:rp|idr)\s*[:.]?\s*(\d[\d.,]+)/i,
+    /(\d[\d.,]+)\s*(?:rb|ribu|jt|juta)/i,
+    /(?:nominal|jumlah|bayar|biaya|transfer)\s*[:.]?\s*(\d[\d.,]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = rawText.match(pattern);
+
+    if (match) {
+      const parsed = normalizeNotificationAmount(match[1]);
+
+      if (parsed !== null) return parsed;
+    }
+  }
+
+  const fallbackMatch = rawText.match(/(\d[\d.,]{2,}\d|\d{3,})/g);
+
+  if (!fallbackMatch) return null;
+
+  for (const candidate of fallbackMatch) {
+    const parsed = normalizeNotificationAmount(candidate);
+
+    if (parsed !== null && parsed > 500 && parsed < 1000000000) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getNotificationSourceLabel(packageName, fallbackText = '') {
+  const normalized = (packageName || '').toLowerCase();
+  const sourceMap = [
+    ['brimo', 'BRIMO'],
+    ['bca', 'BCA Mobile'],
+    ['dana', 'DANA'],
+    ['gopay', 'GoPay'],
+    ['ovo', 'OVO'],
+    ['mandiri', 'Bank Mandiri'],
+    ['jago', 'Bank Jago'],
+    ['shopeepay', 'ShopeePay'],
+    ['linkaja', 'LinkAja'],
+    ['paypal', 'PayPal'],
+  ];
+
+  const matchedSource = sourceMap.find(([key]) =>
+    normalized.includes(key)
+  );
+
+  if (matchedSource) {
+    return matchedSource[1];
+  }
+
+  const fallback = (fallbackText || packageName || 'Aplikasi')
+    .toLowerCase();
+
+  const fallbackMap = [
+    ['brimo', 'BRIMO'],
+    ['bca', 'BCA Mobile'],
+    ['dana', 'DANA'],
+    ['gopay', 'GoPay'],
+    ['ovo', 'OVO'],
+    ['mandiri', 'Bank Mandiri'],
+    ['jago', 'Bank Jago'],
+  ];
+
+  const matchedFallback = fallbackMap.find(([key]) =>
+    fallback.includes(key)
+  );
+
+  if (matchedFallback) return matchedFallback[1];
+
+  const lastSegment = (packageName || '').split('.').filter(Boolean).pop();
+
+  if (!lastSegment) return 'Aplikasi';
+
+  return lastSegment
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function buildNotificationSummary(sourceLabel, title, text, nominal) {
+  const rawSummary = (title || text || 'Pembayaran')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const summary = rawSummary || 'Pembayaran';
+  const lowerSummary = summary.toLowerCase();
+  const description =
+    lowerSummary.includes('pembayaran') ||
+    lowerSummary.includes('payment') ||
+    lowerSummary.includes('transfer') ||
+    lowerSummary.includes('purchase') ||
+    lowerSummary.includes('paid') ||
+    lowerSummary.includes('top up')
+      ? summary
+      : 'Pembayaran';
+
+  if (nominal === null) {
+    return `${sourceLabel}: ${description}`;
+  }
+
+  return `${sourceLabel}: ${description} ${formatRupiah(nominal)}`;
+}
 
 function tanggalHariIni() {
   return new Date().toLocaleDateString('id-ID', {
@@ -217,6 +340,12 @@ export default function App() {
   const [pengguna, setPengguna] = useState(null);
   const [authSudahDicek, setAuthSudahDicek] = useState(false);
   const [sedangLogin, setSedangLogin] = useState(false);
+  const [notificationAccessEnabled, setNotificationAccessEnabled] =
+    useState(false);
+  const [pendingPaymentNotifications, setPendingPaymentNotifications] =
+    useState([]);
+  const [pendingNotificationDraftId, setPendingNotificationDraftId] =
+    useState(null);
 
   // Pantau status login Firebase.
   useEffect(() => {
@@ -534,15 +663,43 @@ export default function App() {
     gagalMuatData,
   ]);
 
-  const totalPemasukan = transaksi
-    .filter((item) => item.tipe === 'pemasukan')
-    .reduce((total, item) => total + item.nominal, 0);
+  // pembacaan notif
+  useEffect(() => {
+    const checkNotifications = () => {
+      try {
+        const enabled =
+          DuwekkuNotificationListener.isNotificationAccessEnabled();
 
-  const totalPengeluaran = transaksi
-    .filter((item) => item.tipe === 'pengeluaran')
-    .reduce((total, item) => total + item.nominal, 0);
+        setNotificationAccessEnabled(enabled);
 
-  const saldo = totalPemasukan - totalPengeluaran;
+        if (enabled) {
+          const notifications =
+            DuwekkuNotificationListener.getPendingNotifications();
+
+          if (notifications.length > 0) {
+            setPendingPaymentNotifications((previous) => {
+              const existingIds = new Set(previous.map((item) => item.id));
+
+              return [
+                ...previous,
+                ...notifications.filter(
+                  (item) => !existingIds.has(item.id)
+                ),
+              ];
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Gagal membaca notifikasi:', error);
+      }
+    };
+
+    checkNotifications();
+
+    const interval = setInterval(checkNotifications, 3000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const {
     mulai: awalPeriode,
@@ -558,6 +715,16 @@ export default function App() {
       tanggalItem < akhirPeriode
     );
   });
+
+  const totalPemasukan = transaksiPeriode
+    .filter((item) => item.tipe === 'pemasukan')
+    .reduce((total, item) => total + item.nominal, 0);
+
+  const totalPengeluaran = transaksiPeriode
+    .filter((item) => item.tipe === 'pengeluaran')
+    .reduce((total, item) => total + item.nominal, 0);
+
+  const saldo = totalPemasukan - totalPengeluaran;
 
   const daftarKategori =
     tipe === 'pemasukan'
@@ -581,7 +748,7 @@ export default function App() {
     resetForm();
   }
 
-  function bukaForm(tipeBaru) {
+  function bukaForm(tipeBaru, sourceNotification = null) {
     if (!penggunaUid) {
       Alert.alert(
         'Masuk diperlukan',
@@ -604,6 +771,9 @@ export default function App() {
     }
 
     resetForm();
+    setPendingNotificationDraftId(
+      sourceNotification ? sourceNotification.id : null
+    );
     setTipe(tipeBaru);
     setKategori(tipeBaru === 'pemasukan' ? 'Gaji' : 'Makanan');
     setFormTerbuka(true);
@@ -688,6 +858,7 @@ export default function App() {
     }
 
     const uidTarget = penggunaUid;
+    const draftNotificationId = pendingNotificationDraftId;
     setSedangSimpanTransaksi(true);
 
     try {
@@ -719,6 +890,18 @@ export default function App() {
           )
         );
 
+        if (draftNotificationId) {
+          DuwekkuNotificationListener.acknowledgeNotification(
+            draftNotificationId
+          );
+          setPendingPaymentNotifications((previous) =>
+            previous.filter(
+              (notification) => notification.id !== draftNotificationId
+            )
+          );
+          setPendingNotificationDraftId(null);
+        }
+
         resetForm();
         setFormTerbuka(false);
         Alert.alert('Berhasil!', 'Transaksi berhasil diperbarui dan disinkronkan.');
@@ -748,6 +931,18 @@ export default function App() {
         ...dataLama.filter((item) => item.id !== transaksiBaru.id),
       ]);
 
+      if (draftNotificationId) {
+        DuwekkuNotificationListener.acknowledgeNotification(
+          draftNotificationId
+        );
+        setPendingPaymentNotifications((previous) =>
+          previous.filter(
+            (notification) => notification.id !== draftNotificationId
+          )
+        );
+        setPendingNotificationDraftId(null);
+      }
+
       tutupForm();
       Alert.alert('Berhasil!', 'Transaksi berhasil ditambahkan dan disinkronkan.');
     } catch (error) {
@@ -770,6 +965,8 @@ export default function App() {
       return;
     }
 
+    setPendingNotificationDraftId(null);
+
     if (tanggalTransaksiKeDate(item.tanggal)) {
       setTanggalAcuan(
         tanggalTransaksiKeDate(item.tanggal)
@@ -790,6 +987,62 @@ export default function App() {
 
     setJam(item.jam || jamSekarang());
     setFormTerbuka(true);
+  }
+
+  function handleNotificationAction(item) {
+    const sourceLabel = getNotificationSourceLabel(
+      item.packageName,
+      item.title || item.text || ''
+    );
+    const amount = parseNominalNotifikasi(
+      `${item.title || ''} ${item.text || ''}`
+    );
+
+    if (amount === null) {
+      Alert.alert(
+        'Nominal tidak terbaca',
+        'DuwekKu tidak bisa membaca nominal dari notifikasi ini. Silakan isi manual.'
+      );
+      return;
+    }
+
+    const sourceText = `${item.title || ''} ${item.text || ''}`.trim();
+    const normalizedType = /(?:transfer|pembayaran|dibayar|bayar|purchase|paid|debit|payment|top up|cashout|purchase)/i.test(sourceText)
+      ? 'pengeluaran'
+      : 'pemasukan';
+
+    resetForm();
+    setPendingNotificationDraftId(item.id);
+    setIdSedangDiedit(null);
+    setTipe(normalizedType);
+    setKategori(normalizedType === 'pemasukan' ? 'Gaji' : 'Makanan');
+    setNominal(String(Math.round(amount)));
+    setCatatan(buildNotificationSummary(sourceLabel, item.title, item.text, amount));
+    setTanggal(
+      item.timestamp
+        ? formatTanggal(new Date(item.timestamp))
+        : tanggalHariIni()
+    );
+    setJam(
+      item.timestamp
+        ? new Date(item.timestamp).toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          })
+        : jamSekarang()
+    );
+    setTanggalAcuan(
+      item.timestamp ? new Date(item.timestamp) : new Date()
+    );
+    setFormTerbuka(true);
+  }
+
+  function handleNotificationIgnore(item) {
+    DuwekkuNotificationListener.acknowledgeNotification(item.id);
+    setPendingPaymentNotifications((previous) =>
+      previous.filter((notification) => notification.id !== item.id)
+    );
   }
 
   function konfirmasiHapus(item) {
@@ -916,12 +1169,12 @@ export default function App() {
                 <Text style={styles.accountAvatarText}>
                   {pengguna
                     ? (
-                        pengguna.displayName ||
-                        pengguna.email ||
-                        'A'
-                      )
-                        .charAt(0)
-                        .toUpperCase()
+                      pengguna.displayName ||
+                      pengguna.email ||
+                      'A'
+                    )
+                      .charAt(0)
+                      .toUpperCase()
                     : '◉'}
                 </Text>
               </View>
@@ -940,8 +1193,121 @@ export default function App() {
           )}
         </View>
 
+        <View style={styles.notificationSection}>
+          <View style={styles.notificationHeaderRowCompact}>
+            <Text style={styles.notificationSectionTitle}>Notifikasi masuk</Text>
+
+            {!notificationAccessEnabled ? (
+              <Pressable
+                style={styles.notificationAccessButton}
+                onPress={() =>
+                  DuwekkuNotificationListener.openNotificationAccessSettings()
+                }
+              >
+                <Text style={styles.notificationAccessText}>Aktifkan</Text>
+              </Pressable>
+            ) : (
+              <Text style={styles.notificationStatusText}>Aktif</Text>
+            )}
+          </View>
+
+          {notificationAccessEnabled ? (
+            pendingPaymentNotifications.length === 0 ? (
+              <Text style={styles.notificationDescription}>
+                Belum ada notifikasi masuk.
+              </Text>
+            ) : (
+              pendingPaymentNotifications.map((item) => {
+                const notificationAmount = parseNominalNotifikasi(
+                  `${item.title || ''} ${item.text || ''}`
+                );
+                const notificationSource = getNotificationSourceLabel(
+                  item.packageName,
+                  item.title || item.text || ''
+                );
+                const notificationDate = item.timestamp
+                  ? new Date(item.timestamp).toLocaleString('id-ID', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : 'Baru';
+
+                return (
+                  <View key={item.id} style={styles.notificationCard}>
+                    <View style={styles.notificationBody}>
+                      <View style={styles.notificationRowTop}>
+                        <Text style={styles.notificationSource} numberOfLines={1}>
+                          {notificationSource}
+                        </Text>
+                        <Text style={styles.notificationMetaText} numberOfLines={1}>
+                          {notificationDate}
+                        </Text>
+                      </View>
+
+                      <View style={styles.notificationRowBottom}>
+                        <Text style={styles.notificationTitle} numberOfLines={1}>
+                          {item.title || 'Pembayaran'}
+                        </Text>
+
+                        <Text style={styles.notificationAmount} numberOfLines={1}>
+                          {notificationAmount !== null
+                            ? formatRupiah(notificationAmount)
+                            : 'Nominal tidak terbaca'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.notificationActionRow}>
+                      <Pressable
+                        style={[
+                          styles.notificationActionButton,
+                          styles.notificationAcceptButton,
+                        ]}
+                        onPress={() => handleNotificationAction(item)}
+                        accessibilityLabel="Catat transaksi dari notifikasi"
+                      >
+                        <Text style={styles.notificationActionText}>✓</Text>
+                      </Pressable>
+
+                      <Pressable
+                        style={[
+                          styles.notificationActionButton,
+                          styles.notificationIgnoreButton,
+                        ]}
+                        onPress={() => {
+                          Alert.alert(
+                            'Abaikan notifikasi?',
+                            'Notifikasi ini akan dihapus dari daftar deteksi DuwekKu.',
+                            [
+                              { text: 'Batal', style: 'cancel' },
+                              {
+                                text: 'Abaikan',
+                                style: 'destructive',
+                                onPress: () => handleNotificationIgnore(item),
+                              },
+                            ]
+                          );
+                        }}
+                        accessibilityLabel="Abaikan notifikasi"
+                      >
+                        <Text style={styles.notificationActionText}>✕</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                );
+              })
+            )
+          ) : (
+            <Text style={styles.notificationDescription}>
+              Akses notif belum aktif. Izinkan untuk mulai mendeteksi transaksi.
+            </Text>
+          )}
+        </View>
+
         {!authSudahDicek ||
-        (pengguna && !dataSudahDimuat) ? (
+          (pengguna && !dataSudahDimuat) ? (
           <View style={styles.loadingBox}>
             <Text style={styles.loadingText}>
               Memuat transaksi...
@@ -987,7 +1353,9 @@ export default function App() {
                   Total Saldo
                 </Text>
 
-                <Text style={styles.balanceIcon}>Rp</Text>
+                <Text style={styles.balanceIcon} numberOfLines={1}>
+                  {labelPeriode(periodeAktif, tanggalAcuan)}
+                </Text>
               </View>
 
               <Text
@@ -1094,7 +1462,7 @@ export default function App() {
                     style={[
                       styles.periodTab,
                       periodeAktif === nilai &&
-                        styles.periodTabActive,
+                      styles.periodTabActive,
                     ]}
                     onPress={() => setPeriodeAktif(nilai)}
                   >
@@ -1102,7 +1470,7 @@ export default function App() {
                       style={[
                         styles.periodTabText,
                         periodeAktif === nilai &&
-                          styles.periodTabTextActive,
+                        styles.periodTabTextActive,
                       ]}
                     >
                       {judul}
@@ -1351,9 +1719,9 @@ export default function App() {
                         style={[
                           styles.typeButton,
                           aktif &&
-                            (nilai === 'pemasukan'
-                              ? styles.incomeSelected
-                              : styles.expenseSelected),
+                          (nilai === 'pemasukan'
+                            ? styles.incomeSelected
+                            : styles.expenseSelected),
                         ]}
                         onPress={() => {
                           setTipe(nilai);
@@ -1404,7 +1772,7 @@ export default function App() {
                       style={[
                         styles.categoryButton,
                         kategori === item &&
-                          styles.categorySelected,
+                        styles.categorySelected,
                       ]}
                       onPress={() => setKategori(item)}
                     >
@@ -1412,7 +1780,7 @@ export default function App() {
                         style={[
                           styles.categoryText,
                           kategori === item &&
-                            styles.categoryTextSelected,
+                          styles.categoryTextSelected,
                         ]}
                       >
                         {item}
@@ -1611,7 +1979,7 @@ const styles = StyleSheet.create({
   balanceCard: {
     backgroundColor: '#087F70',
     marginHorizontal: 18,
-    marginTop: 20,
+    marginTop: 8,
     padding: 20,
     borderRadius: 22,
     shadowColor: '#087F70',
@@ -1699,48 +2067,55 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     marginHorizontal: 18,
-    marginTop: 16,
+    marginTop: 12,
   },
   quickAction: {
     flex: 1,
-    minHeight: 62,
+    minHeight: 56,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
     gap: 8,
-    borderRadius: 15,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.6)',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   incomeAction: {
-    backgroundColor: '#DDF5E8',
+    backgroundColor: '#E8FFF0',
   },
   expenseAction: {
-    backgroundColor: '#FCE6E8',
+    backgroundColor: '#FFE9ED',
   },
   quickActionIcon: {
-    fontSize: 21,
-    fontWeight: '700',
-    color: '#102A43',
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#0F172A',
   },
   quickActionText: {
-    color: '#102A43',
-    fontSize: 13,
+    color: '#0F172A',
+    fontSize: 12,
     fontWeight: '700',
   },
   historySection: {
     marginHorizontal: 18,
-    marginTop: 28,
+    marginTop: 20,
   },
   historyHeading: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   sectionTitle: {
-    color: '#102A43',
-    fontSize: 19,
+    color: '#334155',
+    fontSize: 18,
     fontWeight: '800',
-    letterSpacing: -0.3,
+    letterSpacing: -0.2,
   },
   historyCount: {
     color: '#8293A3',
@@ -2090,4 +2465,169 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
   },
+
+  notificationSection: {
+    marginTop: 8,
+    marginBottom: 8,
+    padding: 16,
+    backgroundColor: '#1E293B',
+    borderRadius: 16,
+    marginHorizontal: 18,
+  },
+
+  notificationHeaderRowCompact: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+
+  notificationSectionTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+
+  notificationAccessButton: {
+    backgroundColor: '#16A34A',
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+  },
+
+  notificationAccessText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  notificationStatusText: {
+    color: '#86EFAC',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  notificationDescription: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+
+  notificationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    marginBottom: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#334155',
+    borderRadius: 12,
+  },
+
+  notificationBody: {
+    flex: 1,
+    marginRight: 10,
+  },
+
+  notificationRowTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+
+  notificationRowBottom: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  notificationSource: {
+    flex: 1,
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+    textTransform: 'uppercase',
+  },
+
+  notificationMetaText: {
+    color: '#CBD5E1',
+    fontSize: 10,
+    marginLeft: 8,
+  },
+
+  notificationTitle: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
+  notificationAmount: {
+    color: '#86EFAC',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'right',
+    minWidth: 90,
+  },
+
+  notificationActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+
+  notificationActionButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  notificationIgnoreButton: {
+    backgroundColor: '#475569',
+  },
+
+  notificationAcceptButton: {
+    backgroundColor: '#16A34A',
+  },
+
+  notificationActionText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+
+  primaryButton: {
+    backgroundColor: '#16A34A',
+    padding: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+
+  secondaryButton: {
+    alignSelf: 'flex-start',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 8,
+    backgroundColor: '#475569',
+  },
+
+  secondaryButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
 });
+
